@@ -27,6 +27,7 @@ package com.hankcs.lda;
 
 import java.text.DecimalFormat;
 import java.text.NumberFormat;
+import org.apache.commons.math3.random.MersenneTwister;
 
 /**
  * Gibbs sampler for estimating the best assignments of topics for words and
@@ -40,6 +41,8 @@ import java.text.NumberFormat;
 public class LdaGibbsSampler
 {
 
+    MersenneTwister rnd;
+
     /**
      * document data (term lists)<br>
      * 文档
@@ -51,6 +54,7 @@ public class LdaGibbsSampler
      * 词表大小
      */
     int V;
+    double Vd;
 
     /**
      * number of topics<br>
@@ -80,25 +84,25 @@ public class LdaGibbsSampler
      * cwt[i][j] number of instances of word i (term?) assigned to topic j.<br>
      * 计数器，nw[i][j] := 词语i归入主题j的次数
      */
-    int[][] nw;
+    double[][] nw;
 
     /**
      * na[i][j] number of words in document i assigned to topic j.<br>
      * 计数器，nd[i][j] := 文档[i]中归入主题j的词语的个数
      */
-    int[][] nd;
+    double[][] nd;
 
     /**
      * nwsum[j] total number of words assigned to topic j.<br>
      * 计数器，nwsum[j] := 归入主题j词语的个数
      */
-    int[] nwsum;
+    double[] nwsum;
 
     /**
      * nasum[i] total number of words in document i.<br>
      * 计数器,ndsum[i] := 文档i中全部词语的数量
      */
-    int[] ndsum;
+    double[] ndsum;
 
     /**
      * cumulative statistics of theta<br>
@@ -156,6 +160,7 @@ public class LdaGibbsSampler
 
         this.documents = documents;
         this.V = V;
+        this.rnd = new MersenneTwister(0);
     }
 
     /**
@@ -171,10 +176,10 @@ public class LdaGibbsSampler
         int M = documents.length;
 
         // initialise count variables. 初始化计数器
-        nw = new int[V][K];
-        nd = new int[M][K];
-        nwsum = new int[K];
-        ndsum = new int[M];
+        nw = new double[V][K];
+        nd = new double[M][K];
+        nwsum = new double[K];
+        ndsum = new double[M];
 
         // The z_i are are initialised to values in [1,K] to determine the
         // initial state of the Markov chain.
@@ -186,7 +191,7 @@ public class LdaGibbsSampler
             z[m] = new int[N];
             for (int n = 0; n < N; n++)
             {
-                int topic = (int) (Math.random() * K);
+                int topic = (int) (rnd.nextDouble() * K);
                 z[m][n] = topic;
                 // number of instances of word i assigned to topic j
                 nw[documents[m][n]][topic]++;
@@ -236,20 +241,31 @@ public class LdaGibbsSampler
                                    + " iterations with burn-in of " + BURN_IN + " (B/S="
                                    + THIN_INTERVAL + ").");
 
+                                   double[] p = new double[K];
         for (int i = 0; i < ITERATIONS; i++)
         {
 
             // for all z_i
             for (int m = 0; m < z.length; m++)
             {
-                for (int n = 0; n < z[m].length; n++)
+                double[] ndm = nd[m];
+                double x = 1.0/(ndsum[m] + K * alpha);
+                int [] zm =z[m];
+                int [] docm =documents[m];
+                ndsum[m]--;
+
+                for (int n = 0; n < zm.length; n++)
                 {
 
                     // (z_i = z[m][n])
                     // sample from p(z_i|z_-i, w)
-                    int topic = sampleFullConditional(m, n);
-                    z[m][n] = topic;
+                    int topic1 = zm[n];
+                    int doc = docm[n];
+                    int topic = sampleFullConditional(doc,topic1,ndm,m,x,p);
+                    zm[n] = topic;
                 }
+                ndsum[m]++;
+
             }
 
             if ((i < BURN_IN) && (i % THIN_INTERVAL == 0))
@@ -289,22 +305,22 @@ public class LdaGibbsSampler
      * @param m document
      * @param n word
      */
-    private int sampleFullConditional(int m, int n)
+    private int sampleFullConditional(int doc, int topic, double[] ndm,int m,double x,double[] p)
     {
 
         // remove z_i from the count variables  先将这个词从计数器中抹掉
-        int topic = z[m][n];
-        nw[documents[m][n]][topic]--;
-        nd[m][topic]--;
+
+        nw[doc][topic]--;
+        ndm[topic]--;
         nwsum[topic]--;
-        ndsum[m]--;
+        double[] nwdoc = nw[doc];
 
         // do multinomial sampling via cumulative method: 通过多项式方法采样多项式分布
-        double[] p = new double[K];
+
         for (int k = 0; k < K; k++)
         {
-            p[k] = (nw[documents[m][n]][k] + beta) / (nwsum[k] + V * beta)
-                    * (nd[m][k] + alpha) / (ndsum[m] + K * alpha);
+            p[k] =  (nwdoc[k] + beta) / (nwsum[k] + V * beta)
+                    * (ndm[k] + alpha) * x;
         }
         // cumulate multinomial parameters  累加多项式分布的参数
         for (int k = 1; k < p.length; k++)
@@ -312,7 +328,7 @@ public class LdaGibbsSampler
             p[k] += p[k - 1];
         }
         // scaled sample because of unnormalised p[] 正则化
-        double u = Math.random() * p[K - 1];
+        double u = rnd.nextDouble() * p[K - 1];
         for (topic = 0; topic < p.length; topic++)
         {
             if (u < p[topic])
@@ -320,10 +336,9 @@ public class LdaGibbsSampler
         }
 
         // add newly estimated z_i to count variables   将重新估计的该词语加入计数器
-        nw[documents[m][n]][topic]++;
-        nd[m][topic]++;
+        nw[doc][topic]++;
+        ndm[topic]++;
         nwsum[topic]++;
-        ndsum[m]++;
 
         return topic;
     }
@@ -494,6 +509,7 @@ public class LdaGibbsSampler
     {
         int K = phi.length;
         int V = phi[0].length;
+        double Vd = (double)V;
         // init
 
         // initialise count variables. 初始化计数器
